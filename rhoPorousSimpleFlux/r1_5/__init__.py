@@ -28,8 +28,8 @@ def _createFields( runTime, mesh ):
     from Foam.OpenFOAM import ext_Info, nl
     ext_Info() << "Reading thermophysical properties\n" << nl
 
-    from Foam.thermophysicalModels import basicPsiThermo, autoPtr_basicPsiThermo
-    thermo = basicPsiThermo.New( mesh )
+    from Foam.thermophysicalModels import basicThermo, autoPtr_basicThermo
+    thermo = basicThermo.New( mesh )
     
     from Foam.OpenFOAM import IOdictionary, IOobject, word, fileName
     from Foam.finiteVolume import volScalarField
@@ -41,7 +41,6 @@ def _createFields( runTime, mesh ):
                           thermo.rho() )
     p = thermo.p()
     h = thermo.h()
-    psi = thermo.psi()
 
     ext_Info() << "Reading field U\n" << nl
     from Foam.finiteVolume import volVectorField
@@ -55,7 +54,7 @@ def _createFields( runTime, mesh ):
     from Foam.finiteVolume.cfdTools.compressible import compressibleCreatePhi
     phi = compressibleCreatePhi( runTime, mesh, rho, U )
     
-    pRefCell = 0;
+    pRefCell = 0
     pRefValue = 0.0;
     from Foam.finiteVolume import setRefCell
     pRefCell, pRefValue = setRefCell( p, mesh.solutionDict().subDict( word( "SIMPLE" ) ), pRefCell, pRefValue )
@@ -89,7 +88,7 @@ def _createFields( runTime, mesh ):
           pass
        pass
     
-    return p, h, psi, rho, U, phi, turbulence, thermo, pZones, pMin, pressureImplicitPorosity, initialMass, nUCorr, pRefCell, pRefValue
+    return turbulence, p, h, rho, U, phi, thermo, pZones, pMin, pressureImplicitPorosity, initialMass, nUCorr, pRefCell, pRefValue
 
 
 #------------------------------------------------------------------------------------------------------
@@ -109,14 +108,15 @@ def _UEqn( phi, U, p, turbulence, pZones, pressureImplicitPorosity, nUCorr, eqnR
     
     from Foam import fvm, fvc    
     # Construct the Momentum equation
-
+    
     # The initial C++ expression does not work properly, because of
     #  1. turbulence.divDevRhoReff( U ) - changes values for the U boundaries
     #  2. the order of expression arguments computation differs with C++
-    #UEqn = fvm.div( phi, U ) + turbulence.divDevRhoReff( U ) 
+    #UEqn = fvm.div( phi, U ) - fvm.Sp( fvc.div( phi ), U ) + turbulence.divDevRhoReff( U ) 
 
-    UEqn = turbulence.divDevRhoReff( U ) + fvm.div( phi, U ) 
+    UEqn = turbulence.divDevRhoReff( U ) + ( fvm.div( phi, U ) - fvm.Sp( fvc.div( phi ), U ) )
 
+  
     UEqn.relax()
 
     # Include the porous media resistance and solve the momentum equation
@@ -136,8 +136,10 @@ def _UEqn( phi, U, p, turbulence, pZones, pressureImplicitPorosity, nUCorr, eqnR
         from Foam.OpenFOAM import word
         trTU.rename( word( "rAU" ) )
         
+        gradp = fvc.grad( p )
+        
         for UCorr in range ( nUCorr ):
-            U.ext_assign( trTU & ( UEqn.H() - fvc.grad( p ) ) )
+            U.ext_assign( trTU & ( UEqn.H() - gradp ) )
             pass
         
         U.correctBoundaryConditions()
@@ -242,7 +244,7 @@ def _pEqn( mesh, rho, thermo, p, U, trTU, trAU, UEqn, phi, \
     # For closed-volume cases adjust the pressure and density levels
     # to obey overall mass continuity
     if closedVolume :
-       p.ext_assign( p + ( initialMass - fvc.domainIntegrate( psi * p ) ) / fvc.domainIntegrate( psi ) )
+       p.ext_assign( p + ( initialMass - fvc.domainIntegrate( thermo.psi() * p ) ) / fvc.domainIntegrate( thermo.psi() ) )
        pass
    
     rho.ext_assign( thermo.rho() )
@@ -278,16 +280,18 @@ def main_standalone( argc, argv ):
     from Foam.OpenFOAM.include import createMesh
     mesh = createMesh( runTime )
 
-    p, h, psi, rho, U, phi, turbulence, thermo, pZones, pMin,\
+    turbulence, p, h, rho, U, phi, thermo, pZones, pMin,\
     pressureImplicitPorosity, initialMass, nUCorr, pRefCell, pRefValue  = _createFields( runTime, mesh )
-      
+    
+        
     from Foam.finiteVolume.cfdTools.general.include import initContinuityErrs
     cumulativeContErr = initContinuityErrs()
     
     from Foam.OpenFOAM import ext_Info, nl
     ext_Info()<< "\nStarting time loop\n" << nl
     
-    while runTime.loop() :
+    runTime.increment()
+    while not runTime.end():
         ext_Info() << "Time = " << runTime.timeName() << nl << nl
         
         from Foam.finiteVolume.cfdTools.general.include import readSIMPLEControls
@@ -308,7 +312,7 @@ def main_standalone( argc, argv ):
                                           runTime, pMin, pressureImplicitPorosity, nNonOrthCorr, eqnResidual,\
                                           maxResidual, cumulativeContErr, initialMass, pRefCell, pRefValue )
         
-        turbulence.correct();
+        turbulence.correct()
 
         runTime.write()
         ext_Info() << "ExecutionTime = " << runTime.elapsedCpuTime() << " s" \
@@ -316,6 +320,7 @@ def main_standalone( argc, argv ):
                    << nl << nl
         
         convergenceCheck( runTime, maxResidual, convergenceCriterion)
+        runTime.increment()
         pass
         
     ext_Info() << "End\n"
@@ -326,21 +331,16 @@ def main_standalone( argc, argv ):
 
 #--------------------------------------------------------------------------------------
 import sys, os
-from Foam import FOAM_BRANCH_VERSION
-if FOAM_BRANCH_VERSION( "dev", ">=", "010600" ):
+from Foam import FOAM_REF_VERSION, FOAM_BRANCH_VERSION
+if FOAM_REF_VERSION( "==", "010500" ) or FOAM_BRANCH_VERSION( "dev", "==", "010500" ):
    if __name__ == "__main__" :
       argv = sys.argv
-      if len(argv) > 1 and argv[ 1 ] == "-test":
-         argv = None
-         test_dir= os.path.join( os.environ[ "PYFOAM_TESTING_DIR" ],'cases', 'propogated', 'r1.6-dev', 'compressible', 'rhoPorousSimpleFoam', 'angledDuctExplicit' )
-         argv = [ __file__, "-case", test_dir ]
-         pass
       os._exit( main_standalone( len( argv ), argv ) )
       pass
    pass
 else:
    from Foam.OpenFOAM import ext_Info
-   ext_Info()<< "\nTo use this solver, It is necessary to SWIG OpenFoam1.6-ext or higher \n "
+   ext_Info()<< "\nTo use this solver, It is necessary to SWIG OpenFoam1.5 \n "
 
 
 #--------------------------------------------------------------------------------------

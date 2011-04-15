@@ -54,7 +54,7 @@ def _createFields( runTime, mesh ):
     from Foam.finiteVolume.cfdTools.compressible import compressibleCreatePhi
     phi = compressibleCreatePhi( runTime, mesh, rho, U )
     
-    pRefCell = 0
+    pRefCell = 0;
     pRefValue = 0.0;
     from Foam.finiteVolume import setRefCell
     pRefCell, pRefValue = setRefCell( p, mesh.solutionDict().subDict( word( "SIMPLE" ) ), pRefCell, pRefValue )
@@ -62,9 +62,9 @@ def _createFields( runTime, mesh ):
     from Foam.OpenFOAM import dimensionedScalar
     pMin = dimensionedScalar( mesh.solutionDict().subDict( word( "SIMPLE" ) ).lookup( word( "pMin" ) ) )
        
-    ext_Info() << "Creating turbulence model\n" << nl
-    from Foam import compressible
-    turbulence = compressible.RASModel.New( rho, U, phi, thermo() )
+    #ext_Info() << "Creating turbulence model\n" << nl
+    #from Foam import compressible
+    #turbulence = compressible.turbulenceModel.New( rho, U, phi, thermo() )
     
     from Foam import fvc
     initialMass = fvc.domainIntegrate( rho )
@@ -73,22 +73,15 @@ def _createFields( runTime, mesh ):
     pZones = porousZones( mesh )
     
     from Foam.OpenFOAM import Switch
-    pressureImplicitPorosity = Switch( False )
+    pressureImplicitPorousity = Switch( False )
 
     nUCorr = 0
     
     if pZones.size() :
-       # nUCorrectors for pressureImplicitPorosity
-       if (mesh.solutionDict().subDict( word( "SIMPLE" ) ).found( word( "nUCorrectors" ) ) ) :
-          from Foam.OpenFOAM import readInt
-          nUCorr = readInt( mesh.solutionDict().subDict( word( "SIMPLE" ) ).lookup( word( "nUCorrectors" ) ) )
-          pass
-       if nUCorr > 0 :
-          pressureImplicitPorosity = True
-          pass
+       mesh.solutionDict().subDict( word( "SIMPLE" ) ).lookup( word( "pressureImplicitPorousity" ) ) >> pressureImplicitPorousity
        pass
     
-    return turbulence, p, h, rho, U, phi, thermo, pZones, pMin, pressureImplicitPorosity, initialMass, nUCorr, pRefCell, pRefValue
+    return p, h, rho, U, phi, thermo, pZones, pMin, pressureImplicitPorousity, initialMass, nUCorr, pRefCell, pRefValue
 
 
 #------------------------------------------------------------------------------------------------------
@@ -104,11 +97,11 @@ def initConvergenceCheck( simple ):
 
 
 #------------------------------------------------------------------------------------- 
-def _UEqn( phi, U, p, turbulence, pZones, pressureImplicitPorosity, nUCorr, eqnResidual, maxResidual ):
+def _UEqn( phi, U, p, turbulence, pZones, pressureImplicitPorosity, nUCorr ):
     
     from Foam import fvm, fvc    
     # Construct the Momentum equation
-    
+
     # The initial C++ expression does not work properly, because of
     #  1. turbulence.divDevRhoReff( U ) - changes values for the U boundaries
     #  2. the order of expression arguments computation differs with C++
@@ -116,7 +109,6 @@ def _UEqn( phi, U, p, turbulence, pZones, pressureImplicitPorosity, nUCorr, eqnR
 
     UEqn = turbulence.divDevRhoReff( U ) + ( fvm.div( phi, U ) - fvm.Sp( fvc.div( phi ), U ) )
 
-  
     UEqn.relax()
 
     # Include the porous media resistance and solve the momentum equation
@@ -125,7 +117,7 @@ def _UEqn( phi, U, p, turbulence, pZones, pressureImplicitPorosity, nUCorr, eqnR
 
     trAU = None
     trTU = None
-    if pressureImplicitPorosity :
+    if pressureImplicitPorousity :
         from Foam.finiteVolume import sphericalTensor, tensor
         tTU = tensor( sphericalTensor.I ) * UEqn.A()
 
@@ -136,20 +128,14 @@ def _UEqn( phi, U, p, turbulence, pZones, pressureImplicitPorosity, nUCorr, eqnR
         from Foam.OpenFOAM import word
         trTU.rename( word( "rAU" ) )
         
-        gradp = fvc.grad( p )
-        
-        for UCorr in range ( nUCorr ):
-            U.ext_assign( trTU & ( UEqn.H() - gradp ) )
-            pass
-        
+        U.ext_assign( trTU & ( UEqn.H() - fvc.grad( p ) ) )
         U.correctBoundaryConditions()
+        
     else:
         pZones.addResistance( UEqn )
         
         from Foam.finiteVolume import solve
-        eqnResidual =  solve( UEqn == - fvc.grad( p ) ).initialResidual()
-        
-        maxResidual = max( eqnResidual, maxResidual )
+        solve( UEqn == - fvc.grad( p ) )
         
         trAU = 1.0 / UEqn.A()
         
@@ -158,11 +144,11 @@ def _UEqn( phi, U, p, turbulence, pZones, pressureImplicitPorosity, nUCorr, eqnR
         
         pass
     
-    return UEqn, trTU, trAU, eqnResidual, maxResidual
+    return UEqn, trTU, trAU
 
 
 #---------------------------------------------------------------------------------------
-def _hEqn( thermo, phi, h, turbulence, p, rho, eqnResidual, maxResidual):
+def _hEqn( thermo, phi, h, turbulence, p, rho ):
     from Foam.finiteVolume import fvScalarMatrix
     from Foam import fvc, fvm
     
@@ -174,20 +160,18 @@ def _hEqn( thermo, phi, h, turbulence, p, rho, eqnResidual, maxResidual):
     hEqn =  ( left_expr == right_expr ) 
         
     hEqn.relax()
-    
-    eqnResidual = hEqn.solve().initialResidual()
-    maxResidual = max( eqnResidual, maxResidual )
 
+    hEqn.solve()
     thermo.correct()
     
-    return hEqn, eqnResidual, maxResidual 
+    return hEqn
 
 
 #----------------------------------------------------------------------------------------    
 def _pEqn( mesh, rho, thermo, p, U, trTU, trAU, UEqn, phi, \
-           runTime, pMin, pressureImplicitPorosity, nNonOrthCorr, eqnResidual, maxResidual, cumulativeContErr, initialMass, pRefCell, pRefValue ):
+           runTime, pMin, pressureImplicitPorousity, nNonOrthCorr, eqnResidual, maxResidual, cumulativeContErr, initialMass, pRefCell, pRefValue ):
    
-    if pressureImplicitPorosity :
+    if pressureImplicitPorousity :
        U.ext_assign( trTU & UEqn.H() )
     else:
        U.ext_assign( trAU * UEqn.H() )
@@ -211,13 +195,8 @@ def _pEqn( mesh, rho, thermo, p, U, trTU, trAU, UEqn, phi, \
         
         tpEqn.setReference( pRefCell, pRefValue )
         # retain the residual from the first iteration
-        if nonOrth == 0 :
-            eqnResidual = tpEqn.solve().initialResidual()
-            maxResidual = max( eqnResidual, maxResidual )
-        else:
-            tpEqn.solve()
-            pass
-        
+        tpEqn.solve()
+
         if nonOrth == nNonOrthCorr :
             phi.ext_assign( phi - tpEqn.flux() )
             pass
@@ -230,7 +209,7 @@ def _pEqn( mesh, rho, thermo, p, U, trTU, trAU, UEqn, phi, \
     # Explicitly relax pressure for momentum corrector
     p.relax()
            
-    if pressureImplicitPorosity :
+    if pressureImplicitPorousity :
         U.ext_assign( U - ( trTU & fvc.grad( p ) ) )
     else:
         U.ext_assign( U - ( trAU * fvc.grad( p ) ) )
@@ -280,10 +259,14 @@ def main_standalone( argc, argv ):
     from Foam.OpenFOAM.include import createMesh
     mesh = createMesh( runTime )
 
-    turbulence, p, h, rho, U, phi, thermo, pZones, pMin,\
-    pressureImplicitPorosity, initialMass, nUCorr, pRefCell, pRefValue  = _createFields( runTime, mesh )
+    p, h, rho, U, phi, thermo, pZones, pMin,\
+    pressureImplicitPorousity, initialMass, nUCorr, pRefCell, pRefValue  = _createFields( runTime, mesh )
     
-        
+    from Foam.OpenFOAM import ext_Info, nl    
+    ext_Info() << "Creating turbulence model\n" << nl
+    from Foam import compressible
+    turbulence = compressible.turbulenceModel.New( rho, U, phi, thermo() )
+    
     from Foam.finiteVolume.cfdTools.general.include import initContinuityErrs
     cumulativeContErr = initContinuityErrs()
     
@@ -297,20 +280,17 @@ def main_standalone( argc, argv ):
         from Foam.finiteVolume.cfdTools.general.include import readSIMPLEControls
         simple, nNonOrthCorr, momentumPredictor, fluxGradp, transonic = readSIMPLEControls( mesh )
         
-        eqnResidual, maxResidual, convergenceCriterion = initConvergenceCheck( simple )
-        
         p.storePrevIter()
         rho.storePrevIter()
         # Pressure-velocity SIMPLE corrector
         
-        UEqn, trTU, trAU, eqnResidual, maxResidual = _UEqn( phi, U, p, turbulence, pZones,\
-                                                                        pressureImplicitPorosity, nUCorr, eqnResidual, maxResidual )
+        UEqn, trTU, trAU = _UEqn( phi, U, p, turbulence, pZones,pressureImplicitPorousity, nUCorr )
         
-        hEqn, eqnResidual, maxResidual = _hEqn( thermo, phi, h, turbulence, p, rho, eqnResidual, maxResidual )
+        hEqn = _hEqn( thermo, phi, h, turbulence, p, rho )
         
-        eqnResidual, maxResidual = _pEqn( mesh, rho, thermo, p, U, trTU, trAU, UEqn, phi, \
-                                          runTime, pMin, pressureImplicitPorosity, nNonOrthCorr, eqnResidual,\
-                                          maxResidual, cumulativeContErr, initialMass, pRefCell, pRefValue )
+        _pEqn( mesh, rho, thermo, p, U, trTU, trAU, UEqn, phi, \
+                                          runTime, pMin, pressureImplicitPorousity, nNonOrthCorr, \
+                                          cumulativeContErr, initialMass, pRefCell, pRefValue )
         
         turbulence.correct()
 
@@ -319,7 +299,6 @@ def main_standalone( argc, argv ):
                    << "  ClockTime = " << runTime.elapsedClockTime() << " s" \
                    << nl << nl
         
-        convergenceCheck( runTime, maxResidual, convergenceCriterion)
         runTime.increment()
         pass
         
@@ -328,25 +307,18 @@ def main_standalone( argc, argv ):
     import os
     return os.EX_OK
 
-
-#--------------------------------------------------------------------------------------
+#-----------------------------------------------------------------------------------------------
 import sys, os
-from Foam import FOAM_REF_VERSION, FOAM_BRANCH_VERSION
-if FOAM_REF_VERSION( "==", "010500" ) or FOAM_BRANCH_VERSION( "dev", "==", "010500" ):
+from Foam import FOAM_VERSION
+if FOAM_VERSION( "<=", "010401" ):
    if __name__ == "__main__" :
       argv = sys.argv
-      if len(argv) > 1 and argv[ 1 ] == "-test":
-         argv = None
-         test_dir= os.path.join( os.environ[ "PYFOAM_TESTING_DIR" ],'cases', 'local', 'r1.5', 'rhoPorousSimpleFoam', 'angledDuctExplicit' )
-         argv = [ __file__, "-case", test_dir ]
-         pass
-      
       os._exit( main_standalone( len( argv ), argv ) )
       pass
    pass
 else:
    from Foam.OpenFOAM import ext_Info
-   ext_Info()<< "\nTo use this solver, It is necessary to SWIG OpenFoam1.5 \n "
+   ext_Info()<< "\nTo use this solver, It is necessary to SWIG OpenFoam1.4.1-dev\n "
 
 
 #--------------------------------------------------------------------------------------
