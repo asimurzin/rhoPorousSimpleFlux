@@ -49,7 +49,7 @@ if FOAM_BRANCH_VERSION( "dev", ">=", "010600" ):
 
 
 #--------------------------------------------------------------------------------------
-if FOAM_REF_VERSION( ">=", "010700" ):
+if FOAM_REF_VERSION( ">=", "010700" ) and FOAM_REF_VERSION( "<", "020000" ):
     from rhoPorousSimpleFlux.r1_7_0 import *
     pass
     
