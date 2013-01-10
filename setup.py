@@ -25,6 +25,22 @@
 
 
 #--------------------------------------------------------------------------------------
+def choose_proper_pythonflu( requires ):
+    import pkg_resources
+    for req in requires:
+       try:
+           pkg_resources.require( req )
+           return [ req ]
+       except pkg_resources.DistributionNotFound :
+           pass
+       pass
+    print "There are no proper pythonFlu installation available"
+    print "To use this solver one of the following pythonFlu versions have to be installed - %s" %requires
+    import os; os._exit( os.EX_OK )
+    pass
+
+
+#--------------------------------------------------------------------------------------
 from setuptools import setup, find_packages
 
 setup( name = "rhoPorousSimpleFlux",
@@ -33,7 +49,7 @@ setup( name = "rhoPorousSimpleFlux",
        author_email = 'alexey.petrov.nnov@gmail.com', 
        license = 'GPL',
        url = 'http://sourceforge.net/projects/pythonFlu',
-       install_requires = [ 'pythonflu >=9.0-porting' ],
+       install_requires = choose_proper_pythonflu( [ "pythonflu==9.1-SWIG-1.6-ext-dev", "Foam >=8.2-hybrid" ] ),
        platforms = [ 'linux' ],
        version = "1.3",
        classifiers = [ 'Development Status :: 3 - Alpha',
